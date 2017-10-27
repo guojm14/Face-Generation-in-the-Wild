@@ -12,7 +12,7 @@ import torch.optim as optim
 import logging
 import torchvision.utils  as tov
 import pdb
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--batch_size', type=int, default=128, help='input batch size')
@@ -325,7 +325,7 @@ mone = mone.cuda()
 netD.cuda()
 optimizerD = optim.Adam(netD.parameters(), lr=opt.lr_gan, betas=(opt.beta1, 0.999))
 num_iter=500000
-logging.basicConfig(filename='log/vaenet2.log', level=logging.INFO)
+logging.basicConfig(filename='log/vaenet3.log', level=logging.INFO)
 vae=VAE()
 
 optimizer1=optim.Adam(vae.enco.parameters(),lr=opt.lr_vae)
@@ -334,30 +334,51 @@ datalist=ld.getlist('list_attr_train1.txt')
 iternow1=0
 label = torch.FloatTensor(opt.batch_size)
 label = label.cuda()
-#checkpoint = torch.load('vae_iter_260000.pth.tar')
-#vae.load_state_dict(checkpoint['VAE'])
+checkpoint = torch.load('vae_iter_260000.pth.tar')
+vae.load_state_dict(checkpoint['VAE'])
 vae = vae.cuda()
 for iter1 in range(num_iter):
     vae.train()
 
-    netD.zero_grad()
     imgpo,iternow1=ld.load_data('/ssd/randomcrop_resize_64/','list_attr_train1.txt',datalist,iternow1,opt.batch_size)
-    imgpo_re,mu,logvar,mu1,logvar1,mask0,mask1=vae(imgpo)
+    eps0 = Vb(torch.randn(opt.batch_size, 256).cuda()) #gauss noise bs,256 mask
+    eps1 = Vb(torch.randn(opt.batch_size, 128).cuda())  #gauss noise bs,128 texture
 
+    vae.enco.zero_grad()
+    imgpo_re,mu,logvar,mu1,logvar1,mask0,mask1=vae(imgpo)
+    #labelv = Vb(label.fill_(real_label))
+    fake,_=vae.deco(eps0,eps1)
+    loss1 = loss_like(imgpo_re,imgpo,mask0,mask1)
+    loss2= loss_prior(mu,logvar,mu1,logvar1)
+    loss_enco=loss1+loss2
+    loss_enco.backward()
+    optimizer1.step()
+
+    vae.deco.zero_grad()
+    imgpo_re,mu,logvar,mu1,logvar1,mask0,mask1=vae(imgpo)
+    fake,_=vae.deco(eps0,eps1)
+    output = netD(fake)
+    output1=netD(imgpo_re)
+    loss4=output1.mean()
+    loss3=output.mean()
+    #loss3  = criterion(output labelv)
+    loss1=likeweight*loss_like(imgpo_re,imgpo,mask0,mask1)
+    lossdeco=loss1-loss3-loss4
+    lossdeco.backward()
+    optimizer2.step()
+
+    netD.zero_grad()
+    imgpo_re,mu,logvar,mu1,logvar1,mask0,mask1=vae(imgpo)
+    fake,_=vae.deco(eps0,eps1)
     real = imgpo;
-    label.resize_(opt.batch_size).fill_(real_label)
-    labelv = Vb(label)
+    #label.resize_(opt.batch_size).fill_(real_label)
+    #labelv = Vb(label)
     output = netD(real);
     D_real = output.mean()
     #errD_real = criterion(output, labelv)
     #errD_real.backward()
     #D_x = output.data.mean()
     D_real.backward(mone)
-
-    eps0 = Vb(mu.data.new(mu1.size()).normal_()) #gauss noise bs,256 mask
-    eps1 = Vb(mu.data.new(mu.size()).normal_())  #gauss noise bs,128 texture
-    fake,_=vae.deco(eps0,eps1)    # sample
-    labelv = Vb(label.fill_(fake_label))
 
     output = netD(fake.detach())
     D_fake = output.mean()
@@ -381,26 +402,9 @@ for iter1 in range(num_iter):
     #errD = errD_real + errD_fake
     optimizerD.step()
 
-    vae.enco.zero_grad()
-    #labelv = Vb(label.fill_(real_label))
-    loss1 = loss_like(imgpo_re,imgpo,mask0,mask1)
-    loss2= loss_prior(mu,logvar,mu1,logvar1)
-    loss1.backward(retain_graph=True)
-    loss2.backward(retain_graph=True)
-    optimizer1.step()
-
-    vae.deco.zero_grad()
-    output = netD(fake)
-    loss3 = output.mean()
-    loss3.backward(mone)
-    #loss3  = criterion(output, labelv)
-    loss1=likeweight*loss1
-    loss1.backward()
-    optimizer2.step()
-
     if iter1%100==0:
         print(iter1)
-        outinfo='vae: '+ str(iter1)+str(loss1)+str(loss2)+' '+str(loss3)
+        outinfo='vae: '+ str(iter1)+str(loss_enco)+str(lossdeco)
         logging.info(outinfo)
         print (outinfo)
         outinfo = 'd: '+str(iter1) + str(D_cost)
@@ -409,17 +413,17 @@ for iter1 in range(num_iter):
     if iter1 % 200 == 0:
         vae.eval()
         saveim=fake.cpu().data
-        tov.save_image(saveim,'./vae_gan2/fake'+str(iter1)+'.jpg')
+        tov.save_image(saveim,'./vae_gan/fake'+str(iter1)+'.jpg')
         saveim=imgpo_re.cpu().data
-        tov.save_image(saveim,'./vae_gan2/recon'+str(iter1)+'.jpg')
+        tov.save_image(saveim,'./vae_gan/recon'+str(iter1)+'.jpg')
         saveim=real.cpu().data
-        tov.save_image(saveim,'./vae_gan2/real'+str(iter1)+'.jpg')
+        tov.save_image(saveim,'./vae_gan/real'+str(iter1)+'.jpg')
     if iter1 %10000==0:
         # save model
-        save_name = './vae_gan2/{}_iter_{}.pth.tar'.format('vae', iter1)
+        save_name = './vae_gan/{}_iter_{}.pth.tar'.format('vae', iter1)
         torch.save({'VAE': vae.state_dict()}, save_name)
         logging.info('save model to {}'.format(save_name))
-        save_name = './vae_gan2/{}_iter_{}.pth.tar'.format('gan', iter1)
+        save_name = './vae_gan/{}_iter_{}.pth.tar'.format('gan', iter1)
         torch.save({'VAE': netD.state_dict()}, save_name)
         logging.info('save model to {}'.format(save_name))
 
